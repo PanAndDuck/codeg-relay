@@ -1,0 +1,9 @@
+target/
+**/target/
+.codex/
+.DS_Store
+*.key
+pair*.json
+pair*.png
+*.token
+relay.env

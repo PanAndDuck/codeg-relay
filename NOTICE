@@ -1,0 +1,10 @@
+codeg-relay
+
+This repository contains the relay server, home connector, and shared tunnel
+originally developed in a fork of the codeg project.
+
+Upstream project: https://github.com/spacering-net/codeg
+Source fork: https://github.com/PanAndDuck/codeg-fork
+
+These components are licensed under the Apache License, Version 2.0.
+See LICENSE for the full license text.

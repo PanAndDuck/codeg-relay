@@ -1,0 +1,31 @@
+[Unit]
+Description=Codeg public TLS relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=codeg-relay
+Group=codeg-relay
+EnvironmentFile=/etc/codeg-relay/relay.env
+ExecStart=/opt/codeg-relay/bin/codeg-relay serve --listen 0.0.0.0:${CODEG_RELAY_PORT} --self-signed --public-host ${CODEG_RELAY_PUBLIC_HOST} --data-dir /var/lib/codeg-relay --agent-key-file /etc/codeg-relay/agent.key
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=6
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/codeg-relay
+ProtectHome=yes
+PrivateTmp=yes
+MemoryMax=128M
+CPUQuota=50%
+TasksMax=256
+LimitNOFILE=8192
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target
