@@ -321,13 +321,12 @@ impl Fixture {
         .unwrap()
     }
     async fn slow_tls(&self) -> tls::Socket {
-        let tcp = tokio::net::TcpStream::connect(self.relay_addr)
-            .await
-            .unwrap();
+        // Set the receive window before the handshake; shrinking it afterwards
+        // makes Linux drain already-buffered data too slowly to observe EOF.
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.set_recv_buffer_size(4096).unwrap();
+        let tcp = socket.connect(self.relay_addr).await.unwrap();
         tls::configure_tcp(&tcp).unwrap();
-        socket2::SockRef::from(&tcp)
-            .set_recv_buffer_size(4096)
-            .unwrap();
         let connector = tokio_rustls::TlsConnector::from(
             tls::client_config(
                 Some(&self.agent.status.snapshot().home_fingerprint),

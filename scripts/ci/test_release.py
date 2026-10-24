@@ -33,8 +33,8 @@ class ReleaseTests(unittest.TestCase):
         self.target = self.root / "fake target"
         self.output = self.root / "dist"
         self.repo.mkdir()
-        (self.repo / "LICENSE").write_text("Example license\n", encoding="utf-8")
-        (self.repo / "NOTICE").write_text("Example notice\n", encoding="utf-8")
+        (self.repo / "LICENSE").write_bytes(b"Example license\n")
+        (self.repo / "NOTICE").write_bytes(b"Example notice\n")
 
     def run_cli(self, *arguments, success=True):
         result = subprocess.run(
@@ -91,6 +91,7 @@ class ReleaseTests(unittest.TestCase):
                 "codeg-relay-agent.exe", "future-launcher.exe", "LICENSE", "NOTICE",
             })
             self.assertEqual(archive.read("future-launcher.exe"), b"gui")
+            self.assertEqual(archive.read("LICENSE"), b"Example license\n")
             self.assertEqual(archive.read("NOTICE"), b"Example notice\n")
         self.check_sidecar(name)
 
@@ -109,7 +110,33 @@ class ReleaseTests(unittest.TestCase):
                     })
                     self.assertEqual(archive.extractfile("codeg-relay-agent").read(), b"unix agent")
                     self.assertEqual(archive.getmember("codeg-relay-agent").mode, 0o755)
+                    self.assertEqual(archive.extractfile("LICENSE").read(), b"Example license\n")
+                    self.assertEqual(archive.extractfile("NOTICE").read(), b"Example notice\n")
                 self.check_sidecar(name)
+
+    def test_archives_preserve_notice_bytes_with_mixed_line_endings(self):
+        notices = {
+            "LICENSE": b"Example license\r\nSecond line\n",
+            "NOTICE": b"Example notice\r\nSecond line\rThird line\n",
+        }
+        for name, data in notices.items():
+            (self.repo / name).write_bytes(data)
+        for target, binary, extension in (
+            ("x86_64-pc-windows-msvc", "codeg-relay-agent.exe", "zip"),
+            ("x86_64-unknown-linux-musl", "codeg-relay-agent", "tar.gz"),
+        ):
+            with self.subTest(target=target):
+                self.binary(target, binary)
+                self.package("agent", target)
+                asset = self.output / f"codeg-relay-agent-{target}.{extension}"
+                if extension == "zip":
+                    with zipfile.ZipFile(asset) as archive:
+                        for name, data in notices.items():
+                            self.assertEqual(archive.read(name), data)
+                else:
+                    with tarfile.open(asset) as archive:
+                        for name, data in notices.items():
+                            self.assertEqual(archive.extractfile(name).read(), data)
 
     def test_relay_assets_are_raw_executables(self):
         for target in ("x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"):
@@ -126,7 +153,7 @@ class ReleaseTests(unittest.TestCase):
         deploy = self.repo / "crates/codeg-relay/deploy"
         (deploy / "nested").mkdir(parents=True)
         for name in ("install.sh", "uninstall.sh", "codeg-relay.service", "nested/README.md"):
-            (deploy / name).write_text(name, encoding="utf-8")
+            (deploy / name).write_bytes(name.encode("utf-8"))
         self.package("deploy")
         with tarfile.open(self.output / "codeg-relay-deploy.tar.gz") as archive:
             self.assertEqual({item.name for item in archive if item.isfile()}, {
@@ -190,8 +217,8 @@ class ReleaseTests(unittest.TestCase):
         result = self.run_cli("checksums", success=False)
         self.assertIn("Checksum mismatch", result.stderr)
         asset.write_bytes(original)
-        (self.output / f"{ASSETS[0]}.sha256").write_text(
-            f"{hashlib.sha256(original).hexdigest()}  wrong-name\n", encoding="utf-8"
+        (self.output / f"{ASSETS[0]}.sha256").write_bytes(
+            f"{hashlib.sha256(original).hexdigest()}  wrong-name\n".encode("ascii")
         )
         result = self.run_cli("checksums", success=False)
         self.assertIn("Checksum mismatch", result.stderr)
