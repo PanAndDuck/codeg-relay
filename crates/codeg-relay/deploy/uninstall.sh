@@ -3,8 +3,12 @@ unset CODEG_DATA_DIR CODEG_HOME CODEG_STATIC_DIR CODEG_ACP_TMP_ROOT CODEG_TOKEN 
 set -euo pipefail
 umask 077
 die() { echo "Error: $*" >&2; exit 1; }
+[[ $(uname -s) == Linux ]] || die 'Run on Linux with systemd'
 [[ $EUID == 0 ]] || die 'Run as root'
 (($# == 0)) || die 'Usage: uninstall.sh (removes relay keys and state)'
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=install-common.sh
+source "$script_dir/install-common.sh"
 exec 9>/run/codeg-relay-install.lock
 flock -n 9 || die 'Another install/uninstall is running'
 marker=/etc/codeg-relay/installed-by-codeg-relay
@@ -14,12 +18,15 @@ if [[ ! -e $marker ]]; then
 fi
 [[ -f $marker && ! -L $marker && $(cat "$marker") == codeg-relay-v1 ]] || die 'Invalid installation marker'
 for path in /etc/codeg-relay /opt/codeg-relay /var/lib/codeg-relay; do [[ ! -L $path ]] || die "Refusing symlink: $path"; done
+dropin_dir=/etc/systemd/system/codeg-relay.service.d
+check_sandbox_dropin "$dropin_dir"
 if systemctl cat codeg-relay.service >/dev/null 2>&1; then
   systemctl disable --now codeg-relay
 elif systemctl is-active --quiet codeg-relay; then
   systemctl stop codeg-relay
 fi
 rm -f /etc/systemd/system/codeg-relay.service
+remove_sandbox_dropin "$dropin_dir"
 systemctl daemon-reload
 if [[ -f /etc/codeg-relay/ufw-port ]]; then
   port=$(cat /etc/codeg-relay/ufw-port)

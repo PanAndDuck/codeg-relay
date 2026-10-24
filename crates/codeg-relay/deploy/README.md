@@ -8,22 +8,48 @@ IP/timing/size metadata and the public `agent_connected` flag. A compromised
 relay can disrupt service, but cannot read or alter traffic or impersonate home
 to phones that pin its certificate.
 
-Download the Linux x64 or arm64 tarball and matching `.sha256` from
-https://github.com/PanAndDuck/codeg-fork/releases. Verify with
-`sha256sum -c codeg-relay-linux-<arch>.tar.gz.sha256`, then extract it and enter
-the extracted directory:
+Download `codeg-relay-x86_64-unknown-linux-musl` or
+`codeg-relay-aarch64-unknown-linux-musl` and its matching `.sha256` from
+https://github.com/PanAndDuck/codeg-relay/releases. Keep the checksum next to
+the binary and copy this entire `deploy/` directory to the VPS:
 
 ```bash
-sudo bash deploy/install.sh --binary ./codeg-relay \
-  --port 18443 --public-host relay.example.com
+sudo bash deploy/install.sh --binary ./codeg-relay-x86_64-unknown-linux-musl \
+  --port 18443 --public-host relay.example.com --no-print-key
 ```
 
 Replace `relay.example.com` with your server's DNS name or IP. Allow that TCP
 port in the provider firewall; optionally pass `--open-firewall` to manage UFW.
-The installer needs systemd, useradd, flock and ss, and does not install packages.
+The installer verifies a sibling `.sha256` when present and refuses mismatches
+or an ELF CPU architecture different from `uname -m`, before changing the
+installation. A download need not already be executable. Missing checksums
+produce a warning; download the matching checksum for release installs.
+The installer needs Linux, root, systemd, useradd, flock, ss, coreutils and
+`sha256sum` (or `shasum`), and does not install packages.
 Keep the generated agent key and certificate fingerprint private. Configure
 Settings → Web service → Remote relay in home codeg, then pair iOS using codeg's
 QR. The agent key is different from the web token used by iOS.
+
+For provider NAT, add `--public-port 24443` and arrange public TCP port 24443
+to forward to the listening `--port 18443`. `--public-port` defaults to `--port`
+and only changes advertised URLs; UFW still manages the listening port. The
+final **Values for the home agent** block supplies the public HTTPS URL,
+relay certificate SHA-256 and `/etc/codeg-relay/agent.key` path, followed by
+the public plaintext health-check command. `--no-print-key` suppresses the
+key even on first creation and prints an `scp` hint to copy it straight to a
+local file (adjust the SSH host/port for your provider). Without the option,
+the key is still printed only when first generated.
+
+For a container VPS that cannot provide mount namespaces or seccomp, add
+`--no-sandbox`. This installs a managed
+`/etc/systemd/system/codeg-relay.service.d/no-sandbox.conf` override. It resets
+the unit's namespace/seccomp directives, including `ReadWritePaths` and
+`RestrictAddressFamilies`, while keeping the dedicated user/group,
+`NoNewPrivileges` and resource limits. The default remains hardened. Namespace,
+capability or seccomp startup failures produce a hint; the installer never
+automatically relaxes the sandbox. Re-running without `--no-sandbox` restores
+the hardened default; uninstall removes this managed override while preserving
+other administrator-owned drop-ins.
 
 The install owns `/opt/codeg-relay`, `/etc/codeg-relay`, `/var/lib/codeg-relay`,
 its dedicated user and unit. Verify existing services remain unaffected before

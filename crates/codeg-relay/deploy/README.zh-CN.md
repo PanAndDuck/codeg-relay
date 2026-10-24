@@ -61,14 +61,21 @@ CARGO_BUILD_JOBS=1 crates/codeg-relay/scripts/build-linux-x86_64.sh
 并执行 static 检查、`--version` 和 3 秒 TLS loopback smoke。dist 不进入 Git。
 
 将 binary、`.sha256`、本 deploy 目录一起复制到 Linux 服务器的暂存目录。需要已有
-systemd、useradd、flock、ss；脚本不安装系统软件，不运行 apt，不操作其它 service。
+systemd、useradd、flock、ss、coreutils，以及 `sha256sum` 或 `shasum`；脚本不安装
+系统软件，不运行 apt，不操作其它 service。安装与卸载仅支持 Linux root 环境。
 Installer 只允许 1024–65535 的非数据库端口，避免接管共享服务端口。
+
+也可直接使用 [独立仓库 Release](https://github.com/PanAndDuck/codeg-relay/releases) 的
+`codeg-relay-x86_64-unknown-linux-musl` 或 `codeg-relay-aarch64-unknown-linux-musl`。
+将同名 `.sha256` 放在 binary 旁边；安装器会自动校验，不匹配或校验文件格式错误就退出，
+没有校验文件时会明确警告并继续。安装前读取 ELF 头并与 `uname -m` 比较，不依赖文件名；
+架构不匹配、压缩包、非 Linux ELF 均会拒绝。下载文件不需要提前 `chmod +x`。
 
 ```bash
 sha256sum -c codeg-relay-x86_64-unknown-linux-musl.sha256
 sudo bash deploy/install.sh \
   --binary ./codeg-relay-x86_64-unknown-linux-musl \
-  --port 18443 --public-host YOUR_PUBLIC_IP
+  --port 18443 --public-host relay.example.com --no-print-key
 # 只有明确需要脚本开放 UFW 时，才添加 --open-firewall
 ```
 
@@ -79,11 +86,55 @@ TasksMax=256、LimitNOFILE=8192。内存/CPU 上限用于隔离共享 VPS；大�
 可能触及资源上限并触发服务重启，不保证 256 streams 能在 128 MiB 下满速运行。
 
 重复执行同一安装命令会保留 agent key 和证书并更新/重启 relay；key 仅首次生成时打印。
+加 `--no-print-key` 后，首次生成也不打印 key，只输出 VPS 文件路径和安全复制提示。
+自动化部署建议始终使用该选项；用 `scp` 将 key 直接保存为本地文件，不要 `cat` 到终端。
 脚本用 marker 拒绝接管同名的未管理目录、用户或 unit。不要将其它文件放入这三个专用目录。
 未指定 `--open-firewall` 时完全不调用 ufw/iptables。
 指定后，已有同端口规则保留；没有时执行 `ufw allow <port>/tcp comment 'codeg-relay'`，
 仅确认新增后记录 `/etc/codeg-relay/ufw-port`。已有 deny/restrictive 规则需管理员自行评估，
 脚本不会覆盖。存在受管理 firewall marker 时，换端口需先卸载。
+
+### NAT 与容器 VPS
+
+`--port` 是 VPS 内部监听端口。供应商有端口映射时，加 `--public-port N` 指定公网
+TCP 端口，取值 1–65535，默认等于 `--port`。请在供应商面板将公网端口映射到内部
+监听端口；脚本不会创建供应商 NAT 规则。UFW 始终使用内部监听端口。
+
+```bash
+sudo bash deploy/install.sh \
+  --binary ./codeg-relay-x86_64-unknown-linux-musl \
+  --port 18443 --public-port 24443 --public-host relay.example.com \
+  --no-sandbox --no-print-key
+```
+
+`--no-sandbox` 用于缺少 namespace/seccomp 能力的容器 VPS，写入受管理的
+`/etc/systemd/system/codeg-relay.service.d/no-sandbox.conf`。它只重置当前 unit 启用的
+8 项：`PrivateTmp`、`ProtectSystem`、`ProtectHome`、`ReadWritePaths`、
+`ProtectKernelTunables`、`ProtectControlGroups`、`RestrictAddressFamilies`、`LockPersonality`。
+`ReadWritePaths` 也需要 mount namespace，不能遗漏；具体机制见
+[systemd.exec 官方文档](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html)。
+当前 unit 没有启用 `PrivateDevices`、`ProtectKernelModules`、`ProtectKernelLogs`、
+`RestrictNamespaces`、`SystemCallFilter` 或 `MemoryDenyWriteExecute`，因此不额外覆盖它们。
+专用 User/Group、NoNewPrivileges、UMask 及资源上限保留。
+
+默认仍使用完整加固。遇到 `226/NAMESPACE`、mount namespacing、`218/CAPABILITIES`
+或 seccomp 等启动错误，会提示按原命令追加 `--no-sandbox` 重试，不会自动降级。
+不带此选项重跑会移除受管理 drop-in 并恢复默认加固；卸载也会移除它。
+同名未管理文件或符号链接会被拒绝，其它管理员 drop-in 会保留。
+
+成功后末尾输出如下（指纹以占位符表示）：
+
+```text
+Values for the home agent:
+Relay URL: https://relay.example.com:24443
+Relay certificate SHA-256: <relay-certificate-sha256>
+Agent-key file (on VPS): /etc/codeg-relay/agent.key
+
+Public health check: curl http://relay.example.com:24443/__codeg_relay/v1/health
+Copy securely (adjust SSH host/port if needed): scp 'root@relay.example.com:/etc/codeg-relay/agent.key' ./agent.key
+```
+
+SSH 的公网主机/端口可能与 relay 不同，复制时按供应商配置调整。
 
 ## 家庭 codeg 与 iOS 配对
 
@@ -121,7 +172,8 @@ curl --fail http://203.0.113.10:18443/__codeg_relay/v1/health
 sudo bash deploy/uninstall.sh
 ```
 
-卸载停止/禁用 relay、删除 unit、daemon-reload；仅在 marker 及现有 rule comment 均匹配时
+卸载停止/禁用 relay、删除 unit 和受管理的 no-sandbox drop-in、daemon-reload；
+其它管理员 drop-in 保留。仅在 marker 及现有 rule comment 均匹配时
 执行 `ufw delete allow <port>/tcp`，从不删除预存规则。外部修改过规则时停止并保留 marker
 供人工核对。随后移除专用用户/组、三个专用目录（包括 key/cert）。再次卸载无副作用。
 卸载前需要保留身份时，将 key/cert 备份到受保护的位置；完整卸载后重新安装会改变身份。
@@ -132,6 +184,8 @@ sudo bash deploy/uninstall.sh
 systemctl disable --now codeg-relay
 ufw delete allow 18443/tcp
 rm -f /etc/systemd/system/codeg-relay.service
+# 仅在确认是安装器创建的文件时删除该 drop-in：
+rm -f /etc/systemd/system/codeg-relay.service.d/no-sandbox.conf
 systemctl daemon-reload
 userdel codeg-relay
 rm -rf /opt/codeg-relay /etc/codeg-relay /var/lib/codeg-relay
