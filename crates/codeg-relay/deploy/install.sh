@@ -167,5 +167,9 @@ fingerprint=$("$relay" fingerprint --data-dir /var/lib/codeg-relay)
 fingerprint=${fingerprint%%$'\n'*}
 [[ $fingerprint =~ ^[[:xdigit:]]{64}$ ]] || die 'Invalid relay certificate SHA-256 fingerprint'
 printf 'Pair iOS with the home codeg web token and home certificate fingerprint.\n'
-printf 'Keep TLS state for future upgrades. Changing public hosts requires a deliberate certificate rotation and re-pairing.\n'
+printf '%s\n' \
+  'Keep relay TLS state for future upgrades; changing public hosts does not rotate existing certificates.' \
+  'If the public URL changes, update the home agent relay_url (and public_url if configured), then update the phone URL or re-import pairing.' \
+  'If the relay certificate changes, obtain its fingerprint through verified SSH, update the home agent relay pin and restart the agent.' \
+  'If the home certificate changes, re-pair every phone with the new home fingerprint.'
 print_home_agent_values "$public_host" "$public_port" "$fingerprint" /etc/codeg-relay/agent.key "$no_print_key"
