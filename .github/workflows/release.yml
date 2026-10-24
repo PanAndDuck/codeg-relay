@@ -1,0 +1,246 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v-prefixed tag to release
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      sha: ${{ steps.revision.outputs.sha }}
+    steps:
+      - name: Validate release tag
+        id: tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          [[ "$RELEASE_TAG" == v* ]]
+          git check-ref-format "refs/tags/$RELEASE_TAG"
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
+          persist-credentials: false
+      - name: Resolve the tagged commit
+        id: revision
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Test release packaging
+        run: python scripts/ci/test_release.py -v
+
+  linux:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [relay, agent]
+        target: [x86_64-unknown-linux-musl, aarch64-unknown-linux-musl]
+        include:
+          - component: relay
+            crate: codeg-relay
+          - component: agent
+            crate: codeg-relay-agent
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/crates/${{ matrix.crate }}/target
+      TARGET: ${{ matrix.target }}
+      CRATE: ${{ matrix.crate }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/${{ matrix.crate }} -> target
+          key: release-${{ matrix.target }}
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: '0.17.0'
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild@0.24.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Build static binaries
+        run: cargo zigbuild --locked --release --bins --target "$TARGET" --manifest-path "crates/$CRATE/Cargo.toml"
+      - name: Require static linking
+        run: |
+          file "$CARGO_TARGET_DIR/$TARGET/release/$CRATE"
+          file "$CARGO_TARGET_DIR/$TARGET/release/$CRATE" | grep -E 'statically linked|static-pie linked'
+      - name: Smoke test relay
+        if: matrix.component == 'relay' && matrix.target == 'x86_64-unknown-linux-musl'
+        run: '"$CARGO_TARGET_DIR/$TARGET/release/$CRATE" --version'
+      - name: Smoke test agent
+        if: matrix.component == 'agent' && matrix.target == 'x86_64-unknown-linux-musl'
+        run: '"$CARGO_TARGET_DIR/$TARGET/release/$CRATE" --help'
+      - name: Package
+        run: >-
+          python scripts/ci/release.py package ${{ matrix.component }}
+          --target "$TARGET" --target-dir "$CARGO_TARGET_DIR" --output-dir dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.crate }}-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  macos:
+    needs: prepare
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/crates/codeg-relay-agent/target
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/codeg-relay-agent -> target
+          key: release-${{ matrix.target }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Build agent
+        run: cargo build --locked --release --bins --target "$TARGET" --manifest-path crates/codeg-relay-agent/Cargo.toml
+      - name: Smoke test native agent
+        run: |
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          if [[ "$host" == "$TARGET" ]]; then
+            "$CARGO_TARGET_DIR/$TARGET/release/codeg-relay-agent" --help
+          fi
+      - name: Package
+        run: >-
+          python scripts/ci/release.py package agent
+          --target "$TARGET" --target-dir "$CARGO_TARGET_DIR" --output-dir dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-codeg-relay-agent-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  windows:
+    needs: prepare
+    runs-on: windows-latest
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/crates/codeg-relay-agent/target
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/codeg-relay-agent -> target
+          key: release-x86_64-pc-windows-msvc
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Build every agent binary
+        run: cargo build --locked --release --bins --target x86_64-pc-windows-msvc --manifest-path crates/codeg-relay-agent/Cargo.toml
+      - name: Smoke test agent
+        run: crates/codeg-relay-agent/target/x86_64-pc-windows-msvc/release/codeg-relay-agent.exe --help
+      - name: Package every agent executable
+        run: >-
+          python scripts/ci/release.py package agent --target x86_64-pc-windows-msvc
+          --target-dir "$CARGO_TARGET_DIR" --output-dir dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-codeg-relay-agent-x86_64-pc-windows-msvc
+          path: dist/*
+          if-no-files-found: error
+
+  deploy:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Package deploy directory
+        run: python scripts/ci/release.py package deploy --output-dir dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-deploy
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: [prepare, linux, macos, windows, deploy]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Validate assets and write SHA256SUMS
+        run: |
+          python scripts/ci/release.py checksums --output-dir dist
+          cd dist
+          sha256sum -c SHA256SUMS
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          prerelease: ${{ contains(needs.prepare.outputs.tag, '-rc') || contains(needs.prepare.outputs.tag, '-beta') }}
+          fail_on_unmatched_files: true
+          files: dist/*
+          body: |
+            Prebuilt relay and home agent binaries, deployment scripts, and SHA-256 checksums.
+
+            See [README.md](https://github.com/PanAndDuck/codeg-relay/blob/${{ needs.prepare.outputs.sha }}/README.md)
+            and [AGENTS.md](https://github.com/PanAndDuck/codeg-relay/blob/${{ needs.prepare.outputs.sha }}/AGENTS.md) for setup and operating instructions.
+            Verify downloads with the matching `.sha256` file or `SHA256SUMS` before installation.
