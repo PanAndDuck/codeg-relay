@@ -1,6 +1,7 @@
 target/
 **/target/
 .codex/
+.serena/
 .DS_Store
 *.key
 pair*.json
