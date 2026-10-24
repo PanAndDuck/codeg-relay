@@ -91,12 +91,14 @@ pub fn load(data_dir: &Path, regenerate: bool) -> CertResult<HomeTls> {
 
 fn private_dir(dir: &Path) -> CertResult<()> {
     match fs::symlink_metadata(dir) {
-        Ok(meta) if !meta.file_type().is_dir() => {
-            return Err("TLS directory must be a directory, not a symlink".into())
+        Ok(meta) if !meta.is_dir() || crate::secrets::is_redirect(&meta) => {
+            return Err("TLS directory must be a directory, not a symlink or reparse point".into())
         }
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let mut builder = fs::DirBuilder::new();
+            let builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            let mut builder = builder;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::DirBuilderExt;
@@ -131,7 +133,8 @@ fn private_write(path: &Path, bytes: &[u8]) -> CertResult<()> {
 fn read(dir: &Path) -> CertResult<HomeTls> {
     for name in ["cert.pem", "key.pem"] {
         let path = dir.join(name);
-        if !fs::symlink_metadata(&path)?.file_type().is_file() {
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.is_file() || crate::secrets::is_redirect(&metadata) {
             return Err("TLS identity requires regular files".into());
         }
         #[cfg(unix)]
@@ -140,12 +143,12 @@ fn read(dir: &Path) -> CertResult<HomeTls> {
             fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
         }
     }
-    let certs = rustls_pemfile::certs(&mut BufReader::new(fs::File::open(dir.join("cert.pem"))?))
+    let certs = rustls_pemfile::certs(&mut BufReader::new(identity_file(&dir.join("cert.pem"))?))
         .collect::<Result<Vec<_>, _>>()?;
     let leaf = certs.first().ok_or("Empty home certificate")?;
     let fingerprint = crate::tls::fingerprint_der(leaf.as_ref());
     let key =
-        rustls_pemfile::private_key(&mut BufReader::new(fs::File::open(dir.join("key.pem"))?))?
+        rustls_pemfile::private_key(&mut BufReader::new(identity_file(&dir.join("key.pem"))?))?
             .ok_or("Empty home key")?;
     let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
@@ -158,6 +161,18 @@ fn read(dir: &Path) -> CertResult<HomeTls> {
         acceptor: TlsAcceptor::from(Arc::new(config)),
         fingerprint,
     })
+}
+
+fn identity_file(path: &Path) -> CertResult<fs::File> {
+    #[cfg(windows)]
+    {
+        // Use the same no-reparse handle policy as other credential readers.
+        crate::secrets::open_private(path, false).map_err(Into::into)
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(fs::File::open(path)?)
+    }
 }
 
 #[cfg(test)]

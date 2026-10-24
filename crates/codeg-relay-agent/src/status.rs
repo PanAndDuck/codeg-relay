@@ -13,6 +13,12 @@ pub fn now() -> u64 {
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Status {
+    #[cfg(windows)]
+    #[serde(default)]
+    pub state_dir: Option<std::path::PathBuf>,
+    #[cfg(windows)]
+    #[serde(default)]
+    pub log_dir: Option<std::path::PathBuf>,
     pub state: String,
     pub pid: u32,
     pub updated_at: u64,

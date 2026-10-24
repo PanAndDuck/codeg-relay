@@ -61,8 +61,10 @@ pub fn configure(options: &Serve) -> Result<(Option<TlsAcceptor>, String)> {
                 &staging.path().join("cert.pem"),
                 generated.cert.pem().as_bytes(),
             )?;
+            #[cfg(unix)]
             fs::File::open(staging.path())?.sync_all()?;
             fs::rename(staging.path(), &dir)?;
+            #[cfg(unix)]
             fs::File::open(&options.data_dir)?.sync_all()?;
         }
         #[cfg(unix)]
@@ -143,6 +145,7 @@ mod tests {
         };
         options
     }
+    #[cfg(unix)]
     #[test]
     fn tls_directory_symlink_does_not_write_outside_data_dir() {
         let dir = tempfile::tempdir().unwrap();

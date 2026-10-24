@@ -3,6 +3,7 @@ name = "codeg-relay-agent"
 version = "0.1.0"
 edition = "2021"
 publish = false
+default-run = "codeg-relay-agent"
 
 [workspace]
 
@@ -41,6 +42,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry"] }
 url = "2"
 webpki-roots = "1"
+
+[target.'cfg(windows)'.dependencies]
+# Already in Cargo.lock transitively. Typed Win32 bindings are needed for a
+# hidden session-notification window: GUI-subsystem tasks have no console.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 axum = { version = "0.8", features = ["ws"] }
