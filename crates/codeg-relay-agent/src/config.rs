@@ -45,7 +45,9 @@ impl Default for Config {
             public_url: None,
             upstream_url: "http://127.0.0.1:3080".into(),
             upstream_fingerprint: None,
-            token_source: TokenSource::Database(default_database()),
+            // Explicit token/db paths must work even if the default environment
+            // is unavailable. validate() resolves this sentinel fallibly.
+            token_source: TokenSource::Database(default_database().unwrap_or_default()),
             buffer_bytes: 8 * 1024 * 1024,
             stall_timeout_secs: 30,
             token_refresh_secs: 60,
@@ -58,6 +60,11 @@ impl Default for Config {
 
 impl Config {
     pub fn validate(&mut self) -> anyhow::Result<()> {
+        if let TokenSource::Database(path) = &mut self.token_source {
+            if path.as_os_str().is_empty() {
+                *path = default_database()?;
+            }
+        }
         self.relay_url = relay_url(&self.relay_url)?;
         self.relay_fingerprint = normalize_fingerprint(&self.relay_fingerprint)?;
         if let Some(value) = &mut self.public_url {
@@ -191,19 +198,27 @@ pub fn absolute_path(path: &Path) -> anyhow::Result<PathBuf> {
     })
 }
 pub fn user_home() -> anyhow::Result<PathBuf> {
-    std::env::var_os("HOME")
+    #[cfg(windows)]
+    let variable = "USERPROFILE";
+    #[cfg(not(windows))]
+    let variable = "HOME";
+    std::env::var_os(variable)
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
-        .context("HOME must name an absolute directory; supply --state-dir")
+        .with_context(|| format!("{variable} must name an absolute directory; supply --state-dir"))
 }
 pub fn default_state_dir() -> anyhow::Result<PathBuf> {
-    let home = user_home()?;
+    #[cfg(windows)]
+    {
+        Ok(windows_app_data("LOCALAPPDATA", "--state-dir")?.join("codeg-relay-agent"))
+    }
     #[cfg(target_os = "macos")]
     {
-        Ok(home.join("Library/Application Support/codeg-relay-agent"))
+        Ok(user_home()?.join("Library/Application Support/codeg-relay-agent"))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
+        let home = user_home()?;
         Ok(std::env::var_os("XDG_STATE_HOME")
             .map(PathBuf::from)
             .filter(|p| p.is_absolute())
@@ -211,21 +226,91 @@ pub fn default_state_dir() -> anyhow::Result<PathBuf> {
             .join("codeg-relay-agent"))
     }
 }
-fn default_database() -> PathBuf {
+pub fn default_database() -> anyhow::Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        Ok(
+            windows_app_data("APPDATA", "init --db-path or init --token-file")?
+                .join("app.codeg")
+                .join("codeg.db"),
+        )
+    }
+    #[cfg(not(windows))]
     let home = user_home().unwrap_or_default();
     #[cfg(target_os = "macos")]
     {
-        home.join("Library/Application Support/app.codeg/codeg.db")
+        Ok(home.join("Library/Application Support/app.codeg/codeg.db"))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
-        home.join(".local/share/app.codeg/codeg.db")
+        Ok(home.join(".local/share/app.codeg/codeg.db"))
+    }
+}
+
+#[cfg(windows)]
+fn windows_app_data(variable: &str, override_hint: &str) -> anyhow::Result<PathBuf> {
+    app_data_path(std::env::var_os(variable), variable, override_hint)
+}
+
+#[cfg(any(windows, test))]
+fn app_data_path(
+    value: Option<std::ffi::OsString>,
+    variable: &str,
+    override_hint: &str,
+) -> anyhow::Result<PathBuf> {
+    value
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .with_context(|| {
+            format!("{variable} must name an absolute directory; supply {override_hint}")
+        })
+}
+
+/// Service log location. An explicit state directory also provides a fallback
+/// when LOCALAPPDATA is unavailable (e.g. a deliberately minimal environment).
+pub fn default_log_dir(state_dir: &Path) -> anyhow::Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        Ok(match std::env::var_os("LOCALAPPDATA") {
+            Some(value) => app_data_path(Some(value), "LOCALAPPDATA", "run --log-dir")?
+                .join("codeg-relay-agent")
+                .join("logs"),
+            None => state_dir.join("logs"),
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = state_dir;
+        #[cfg(target_os = "macos")]
+        return Ok(user_home()?.join("Library/Logs/codeg-relay-agent"));
+        #[cfg(not(target_os = "macos"))]
+        return Ok(user_home()?.join(".local/state/codeg-relay-agent/logs"));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn app_data_requires_an_absolute_directory_and_names_the_override() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(
+            app_data_path(
+                Some(root.path().as_os_str().into()),
+                "LOCALAPPDATA",
+                "--state-dir"
+            )
+            .unwrap(),
+            root.path()
+        );
+        for value in [None, Some("".into()), Some("relative".into())] {
+            let error = app_data_path(value, "APPDATA", "init --db-path")
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("APPDATA"));
+            assert!(error.contains("init --db-path"));
+        }
+    }
     #[test]
     fn config_roundtrips_privately_and_rejects_unsafe_limits_or_unknown_fields() {
         let root = tempfile::tempdir().unwrap();

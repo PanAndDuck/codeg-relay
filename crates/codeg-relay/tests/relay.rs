@@ -217,18 +217,23 @@ impl Relay {
         Ok(ws)
     }
     async fn stop(&mut self) {
-        // This PID is the child spawned above from CARGO_BIN_EXE_codeg-relay.
-        let status = Command::new("/bin/kill")
-            .args(["-TERM", &self.child.id().unwrap().to_string()])
-            .status()
-            .await
-            .unwrap();
-        assert!(status.success());
-        assert!(timeout(Duration::from_secs(6), self.child.wait())
-            .await
-            .unwrap()
-            .unwrap()
-            .success());
+        #[cfg(unix)]
+        {
+            // This PID is the child spawned above from CARGO_BIN_EXE_codeg-relay.
+            let status = Command::new("/bin/kill")
+                .args(["-TERM", &self.child.id().unwrap().to_string()])
+                .status()
+                .await
+                .unwrap();
+            assert!(status.success());
+            assert!(timeout(Duration::from_secs(6), self.child.wait())
+                .await
+                .unwrap()
+                .unwrap()
+                .success());
+        }
+        #[cfg(windows)]
+        self.child.kill().await.unwrap();
         self.log_task.take().unwrap().await.unwrap();
     }
 }
@@ -493,6 +498,7 @@ async fn per_ip_cap_closes_and_recovers() {
 #[tokio::test]
 async fn fingerprint_matches_leaf_and_cli_and_survives_restart() {
     use sha2::{Digest, Sha256};
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     let mut relay = Relay::start(64).await;
     let stream = relay.agent_connect().await;
@@ -502,6 +508,7 @@ async fn fingerprint_matches_leaf_and_cli_and_survives_restart() {
         format!("{:x}", Sha256::digest(der.as_ref()))
     );
     drop(stream);
+    #[cfg(unix)]
     for f in ["tls/key.pem", "tls/cert.pem"] {
         assert_eq!(
             std::fs::metadata(relay.dir.path().join(f))
@@ -672,6 +679,7 @@ async fn refused_mux_open_closes_without_client_http() {
     relay.stop().await;
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn sigterm_closes_live_agent_and_partial_requests_within_five_seconds() {
     let mut relay = Relay::start(64).await;

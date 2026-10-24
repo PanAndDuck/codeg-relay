@@ -5,11 +5,31 @@ use std::{
     path::Path,
 };
 
+// Windows credentials inherit the per-user profile ACL: the user, SYSTEM and
+// Administrators. Default state/logs live under LOCALAPPDATA. Explicit paths
+// (including imported key/token files and pairing exports) must also be in a
+// private directory. We deliberately preserve inherited ACLs rather than run
+// icacls for every atomic status/token/log write: environment account names are
+// not security identities, and removing inheritance can discard managed ACLs.
+// Reparse points include junctions, which FileType::is_symlink alone can miss.
+pub(crate) fn is_redirect(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
 pub fn private_dir(path: &Path) -> anyhow::Result<()> {
     if let Ok(metadata) = fs::symlink_metadata(path) {
         ensure!(
-            metadata.is_dir() && !metadata.file_type().is_symlink(),
-            "private directory must not be a symlink"
+            metadata.is_dir() && !is_redirect(&metadata),
+            "private directory must not be a symlink or reparse point"
         );
     } else {
         let mut builder = fs::DirBuilder::new();
@@ -34,7 +54,7 @@ pub fn private_dir(path: &Path) -> anyhow::Result<()> {
 pub fn write_private(path: &Path, data: &[u8], replace: bool) -> anyhow::Result<()> {
     if let Ok(metadata) = fs::symlink_metadata(path) {
         ensure!(
-            metadata.is_file() && !metadata.file_type().is_symlink(),
+            metadata.is_file() && !is_redirect(&metadata),
             "private file must be a regular file"
         );
     }
@@ -70,9 +90,26 @@ pub fn open_private(path: &Path, create: bool) -> anyhow::Result<fs::File> {
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        if let Ok(metadata) = fs::symlink_metadata(path) {
+            ensure!(
+                !is_redirect(&metadata),
+                "private file must not be a reparse point"
+            );
+        }
+        // Open the final reparse point itself, then reject it using handle
+        // metadata, so a final-component replacement cannot redirect the read.
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
     let file = options.open(path).context("cannot open private file")?;
     let metadata = file.metadata()?;
-    ensure!(metadata.is_file(), "private file must be a regular file");
+    ensure!(
+        metadata.is_file() && !is_redirect(&metadata),
+        "private file must be a regular file"
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
