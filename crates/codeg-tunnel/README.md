@@ -1,7 +1,40 @@
 # codeg-tunnel
 
-An edition-2021, unpublished library shared by the browser tunnel, the home
-relay client and the public relay. It has no WebSocket, HTTP, DNS or TLS
+## 中文
+
+独立 home agent 与公网 relay 共用的 Rust edition-2021 协议库，保留浏览器 tunnel 的帧兼容。库不实现 WebSocket/HTTP/DNS/TLS；`frame` 负责编码，`pump` 负责流控与半关闭，`mux` 在任意异步 Stream + Sink 上管理会话。官方 codeg 桌面应用是独立 agent 的 upstream，不是这里的内置家庭 relay 客户端。
+
+### 帧与角色
+
+每条二进制消息为 `[kind:u8][stream:u32 BE][payload]`。DATA 最大32 KiB，host为1–255字节UTF-8，端口非0；IPv6字面量无方括号。
+
+| kind | 名称 | payload |
+| --- | --- | --- |
+| 1 | OPEN | port:u16 BE，host字节长度:u8，host |
+| 2 | OPENED | 空 |
+| 3 | DATA | 流数据 |
+| 4 | WINDOW | credit:u32 BE |
+| 5 | EOF | 空；关闭发送方向，保留接收方向 |
+| 6 | CLOSE | code:u8、最多256字节UTF-8原因 |
+
+浏览器保留 `codeg-tunnel` / `/ws/browser-tunnel`；relay WebSocket 使用 `codeg-relay.v1` / `/__codeg_relay/v1/agent`，agent TLS ALPN 是 `codeg-relay-agent/1`，这些属于传输适配层。relay 是 **Opener**，主动连出的独立 home agent 是 **Acceptor**；连接发起方向与 mux 角色无关。
+
+OPEN的host/port是手机的公网IP/源端口，不是任意拨号目的地。home agent校验IP字面量，在自身终止手机TLS，再鉴权并代理本地codeg。该IP只是relay提供的元数据，不能替代web token。
+
+### 生命周期、流控与边界
+
+ID从1开始每次加2、永不复用；Acceptor拒绝0/偶数/非递增ID，耗尽后须新会话。open/accept可超时或取消；`TunnelStream` 提供 AsyncRead/AsyncWrite。shutdown发送EOF并保留读取；未shutdown直接drop取消两端。transport丢失唤醒读写并可能丢弃缓冲数据。显式 `MuxHandle::close()` 后等待任务结束；仅drop handle不是关闭请求。
+
+每流每方向初始credit256 KiB，pump另有固定32 KiB duplex缓冲。接收credit在入队前扣除，窗口恢复与实际传输绑定；拒绝超额WINDOW/EOF后DATA等非法状态。队列按credit、outgoing_queue和max_streams有界，单字节碎片仍有分配开销，不能把窗口大小当作整个进程内存。传输适配层必须在分配前设置有限WebSocket message/frame大小（32 KiB + 5字节）并禁用压缩。
+
+默认最多256 streams，open timeout10秒，心跳15秒、空闲45秒；写入停滞也由idle_timeout结束。保持Ping/Pong/Close，拒绝文本消息。`MuxMessage::Close`不保留WS close code，需识别`4001 replaced`的agent必须在映射之前处理。
+
+下方英文部分保留完整API签名、状态语义和tokio-tungstenite/axum适配示例；代码标记为说明性示例，不是部署命令。验证命令在末尾；测试仅使用内存transport、临时/模拟数据。部署入口见[根README](../../README.md)。
+
+## English
+
+An edition-2021, unpublished protocol library used by the standalone home
+agent and the public relay, retaining compatibility with the browser tunnel. It has no WebSocket, HTTP, DNS or TLS
 dependency. `frame` and `pump` are copied unchanged from codeg v0.34.0;
 `mux` manages sessions on any asynchronous `Stream + Sink` transport.
 
@@ -39,7 +72,7 @@ handshake settings, not a change to the frame encoding.
 
 Configure exactly one **Opener** and one **Acceptor**. The role is independent
 of which side dialled the WebSocket. For the relay, the public server is the
-Opener and home codeg is the Acceptor. Both use the same `start` function.
+Opener and the standalone home agent is the Acceptor. Both use the same `start` function.
 `MuxConfig::default()` is the Opener configuration.
 
 IDs start at 1, increase by 2, and are never reused. The Acceptor rejects zero,
@@ -53,7 +86,9 @@ request. Incoming requests also expire after `open_timeout`. `accept()` queues
 OPENED before permitting DATA and returns an error if the request/session is
 already closed. Neither `accept()` nor `open()` performs DNS or TCP dialing.
 In the relay, OPEN host/port mean the public client's IP and source port;
-**The home agent must validate the IP literal** and serve the accepted stream in-process.
+**The home agent must validate the IP literal**, terminate phone TLS inside
+the standalone agent, then authenticate and proxy to the separate codeg Web service.
+OPEN metadata is not an authenticated phone identity or an arbitrary dial target.
 
 `TunnelStream` implements `AsyncRead + AsyncWrite + Unpin + Send`.
 `flush()` waits until previously written DATA has been flushed to the transport;
@@ -184,7 +219,7 @@ in the input mapper before mapping it to Close. Some WebSocket implementations
 auto-answer Ping; an explicit same-payload Pong is harmless and preserves the
 generic transport contract.
 
-For **tokio-tungstenite 0.26**, using the dependencies already in codeg:
+For **tokio-tungstenite 0.26**, using the dependencies locked by this repository:
 
 ```rust,ignore
 use codeg_tunnel::mux::{self, MuxConfig, MuxMessage, MuxRole};
@@ -209,7 +244,7 @@ let transport = ws.with(|message: MuxMessage| {
     })
 });
 let (handle, mut incoming, task) = mux::start(transport, MuxConfig {
-    role: MuxRole::Acceptor, // home client dialled OUT but accepts streams
+    role: MuxRole::Acceptor, // standalone home agent dials OUT but accepts streams
     ..MuxConfig::default()
 });
 ```
@@ -225,6 +260,7 @@ Use `MuxRole::Opener` at the public relay and call
 ## Verification
 
 ```sh
+unset CODEG_DATA_DIR CODEG_HOME CODEG_STATIC_DIR CODEG_ACP_TMP_ROOT CODEG_TOKEN CODEG_PORT CODEG_HOST
 cargo test --locked --manifest-path crates/codeg-tunnel/Cargo.toml
 cargo clippy --locked --manifest-path crates/codeg-tunnel/Cargo.toml --all-targets -- -D warnings
 ```
